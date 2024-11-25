@@ -1,30 +1,58 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Github } from 'lucide-react';
 import { useGithub } from '../hooks/useGithub';
 import { Octokit } from '@octokit/rest';
 
 const REPO_NAME = 'art';
-const BATCH_SIZE = 10; // Number of commits to process in parallel
+const BATCH_SIZE = 10;
 
 const Buttons = ({ grid, cellDates, selectedYear }) => {
   const [isLoading, setIsLoading] = useState(false);
-  const { login, logout, accessToken, userData } = useGithub();
+  const { login, logout, accessToken, userData, error, isLoading: authLoading, clearError } = useGithub();
+
+  useEffect(() => {
+    if (error) {
+      console.error('Authentication error:', error);
+    }
+  }, [error]);
 
   const createRepoIfNotExists = async (octokit) => {
     try {
+      // Try to get the repository
       await octokit.rest.repos.get({
         owner: userData.login,
         repo: REPO_NAME,
       });
+      console.log('Repository already exists');
     } catch (error) {
       if (error.status === 404) {
-        await octokit.rest.repos.createForAuthenticatedUser({
-          name: REPO_NAME,
-          private: true,
-          auto_init: true,
-        });
-        // Wait for repo initialization
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log('Creating new repository...');
+        try {
+          // Create new repository
+          await octokit.rest.repos.createForAuthenticatedUser({
+            name: REPO_NAME,
+            private: true,
+            auto_init: true,
+            description: 'GitHub Contributions Art - Generated Patterns'
+          });
+  
+          // Wait for repository initialization
+          console.log('Waiting for repository initialization...');
+          await new Promise(resolve => setTimeout(resolve, 3000));
+  
+          // Verify repository was created
+          await octokit.rest.repos.get({
+            owner: userData.login,
+            repo: REPO_NAME,
+          });
+          console.log('Repository created successfully');
+        } catch (createError) {
+          console.error('Error creating repository:', createError);
+          throw new Error('Failed to create repository. Please try again.');
+        }
+      } else {
+        console.error('Error checking repository:', error);
+        throw error;
       }
     }
   };
@@ -74,31 +102,36 @@ const Buttons = ({ grid, cellDates, selectedYear }) => {
   const handlePushCommits = async () => {
     if (!accessToken) return;
     setIsLoading(true);
-
+    let octokit;
+  
     try {
-      const octokit = new Octokit({ auth: accessToken });
-
-      // Create or get existing repo
+      octokit = new Octokit({ auth: accessToken });
+  
+      // Verify user data is available
+      if (!userData || !userData.login) {
+        throw new Error('User data not available. Please try signing in again.');
+      }
+  
+      console.log('Creating/verifying repository...');
       await createRepoIfNotExists(octokit);
-
-      // Get current commit SHA
+  
+      console.log('Getting repository reference...');
       const { data: ref } = await octokit.rest.git.getRef({
         owner: userData.login,
         repo: REPO_NAME,
         ref: 'heads/main'
       });
       let lastCommitSha = ref.object.sha;
-
-      // Prepare all commits
+  
+      // Prepare commits
       const commits = [];
       for (let col = 0; col < grid[0].length; col++) {
         for (let row = 0; row < grid.length; row++) {
           const level = grid[row][col];
           const date = cellDates[row][col];
-
+  
           if (level <= 0 || date.getFullYear() !== selectedYear) continue;
-
-          // Add commit data for each contribution level
+  
           for (let i = 0; i < level; i++) {
             commits.push({
               date,
@@ -108,38 +141,60 @@ const Buttons = ({ grid, cellDates, selectedYear }) => {
           }
         }
       }
-
-      // Process commits in batches
+  
+      if (commits.length === 0) {
+        throw new Error('No contributions to commit. Please draw a pattern first.');
+      }
+  
+      console.log(`Processing ${commits.length} commits in batches of ${BATCH_SIZE}...`);
+      
       for (let i = 0; i < commits.length; i += BATCH_SIZE) {
         const batch = commits.slice(i, i + BATCH_SIZE);
         lastCommitSha = await processCommitBatch(batch, octokit, lastCommitSha);
-
-        // Update reference after each batch
+  
         await octokit.rest.git.updateRef({
           owner: userData.login,
           repo: REPO_NAME,
           ref: 'heads/main',
           sha: lastCommitSha
         });
+  
+        console.log(`Processed ${Math.min(i + BATCH_SIZE, commits.length)}/${commits.length} commits`);
       }
-
+  
+      console.log('All commits processed successfully');
       window.open(`https://github.com/${userData.login}/${REPO_NAME}`);
     } catch (error) {
       console.error('Error creating pattern:', error);
+      // You might want to add a toast or alert here to show the error to the user
+      alert(`Error: ${error.message || 'Failed to create pattern. Please try again.'}`);
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="w-full bg-[#0d1117] flex justify-center gap-4 pb-8">
+    <div className="w-full bg-[#0d1117] flex flex-col items-center gap-4 pb-8">
+      {error && (
+        <div className="text-red-500 bg-red-100 px-4 py-2 rounded-md flex items-center gap-2">
+          <span>{error}</span>
+          <button 
+            onClick={clearError}
+            className="text-red-700 hover:text-red-900"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      
       {!accessToken ? (
         <button 
           onClick={login}
-          className="flex items-center gap-2 px-4 py-2 bg-[#238636] text-white rounded-md hover:bg-[#2ea043] transition-colors"
+          disabled={authLoading}
+          className="flex items-center gap-2 px-4 py-2 bg-[#238636] text-white rounded-md hover:bg-[#2ea043] transition-colors disabled:opacity-50"
         >
           <Github size={18} />
-          Sign in with GitHub
+          {authLoading ? 'Signing in...' : 'Sign in with GitHub'}
         </button>
       ) : (
         <div className="flex gap-4">
